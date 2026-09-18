@@ -21,6 +21,9 @@ import numpy as np
 import torch
 from torchvision import tv_tensors
 from torchvision.transforms.v2 import Transform
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -145,3 +148,65 @@ class MVTecScrewAlignment(Transform):
             result = result.permute(2, 0, 1).contiguous()
         result = result.to(device=inpt.device, dtype=inpt.dtype)
         return tv_tensors.wrap(result, like=inpt)
+
+
+from torchvision import tv_tensors
+from multiprocessing import get_context
+
+class DebugTransform(Transform):
+    _transformed_types = (tv_tensors.Image, tv_tensors.Mask)
+
+    def __init__(self):
+        super().__init__()
+        # 이미지/마스크 출력 여부를 worker 및 train/val/test 사이에서 공유한다.
+        self._logged = get_context("spawn").Array("b", [False, False])
+
+    def __deepcopy__(self, memo):
+        # Identity 변환이며, Dataset 복사 시에도 같은 로그 상태를 유지한다.
+        memo[id(self)] = self
+        return self
+
+    def transform(self, inpt, params):
+        if isinstance(inpt, tv_tensors.Image):
+            index, kind = 0, "image"
+        elif isinstance(inpt, tv_tensors.Mask):
+            index, kind = 1, "mask"
+        else:
+            return inpt
+
+        # 여러 worker가 동시에 접근해도 각 타입의 로그는 한 번만 출력한다.
+        with self._logged.get_lock():
+            if not self._logged[index]:
+                logger.warning(f"===== DebugTransform called ({kind}) =====")
+                logger.warning(f"type: {type(inpt)}")
+                logger.warning(f"shape: {inpt.shape}")
+                logger.warning(f"dtype: {inpt.dtype}")
+                logger.warning(f"device: {inpt.device}")
+                logger.warning(f"min: {inpt.min().item()}")
+                logger.warning(f"max: {inpt.max().item()}")
+                logger.warning(f"params: {params}")
+                logger.warning("==============================")
+                self._logged[index] = True
+
+        return inpt
+
+    '''
+    ===== DebugTransform called (image) =====
+    type: <class 'torchvision.tv_tensors._image.Image'>
+    shape: torch.Size([3, 1024, 1024])
+    dtype: torch.float32
+    device: cpu
+    min: 0.1568627506494522
+    max: 0.8352941870689392
+    params: {}
+    ==============================
+    ===== DebugTransform called (mask) =====
+    type: <class 'torchvision.tv_tensors._mask.Mask'>
+    shape: torch.Size([1024, 1024])
+    dtype: torch.uint8
+    device: cpu
+    min: 0
+    max: 0
+    params: {}
+    ==============================
+    '''
