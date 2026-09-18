@@ -17,7 +17,7 @@ from custom_preprocessor_data import DebugTransform, MVTecScrewAlignment
 
 from lightning import seed_everything
 from custom_preprocessor_model import CustomPreProcessorModel
-from torchvision.transforms.v2 import Compose, Normalize, Resize
+from torchvision.transforms.v2 import Compose, Normalize
 
 import logging
 
@@ -42,7 +42,6 @@ def main():
     train_augmentations = Compose([
             DebugTransform(),
             MVTecScrewAlignment(),
-            Resize((256, 256), antialias=True),
             Normalize(
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225],

@@ -1,6 +1,7 @@
 """Dataset 단계에서 사용하는 CPU / NumPy 기반 이미지·마스크 전처리.
 
-Compose에서 Resize, Normalize보다 앞에 MVTecScrewAlignment()를 배치한다.
+Compose에서 Normalize 앞에 MVTecScrewAlignment()를 배치한다.
+1024×1024 입력을 warpAffine에서 1/4로 축소해 256×256으로 출력한다.
 입력은 이미지 한 장(Image, RGB float32 [3,H,W], 0~1)과 선택적 마스크
 (Mask, uint8 또는 bool [H,W], 0/1)이다. 배치/CUDA 입력은 지원하지 않는다.
 
@@ -51,7 +52,8 @@ class MVTecScrewAlignment(Transform):
         밝기/대비/색상/노이즈 등 픽셀 값 변환만 사용한다.
         공간 변환은 반드시 공통 SRT 경로에 구현해야 한다.
 
-    기본 설정은 항등 변환이다. 출력 캔버스는 입력과 같은 크기로 유지하며,
+    기본 SRT는 항등 정렬이며, 정렬 후 원점 기준 1/4 축소를 합성한다.
+    출력 캔버스는 256×256이다. 1024×1024 입력을 대상으로 하며,
     이동·회전으로 생기는 빈 영역은 이미지와 마스크 모두 0으로 채운다.
     캔버스 밖으로 이동한 내용은 잘린다.
     """
@@ -111,7 +113,10 @@ class MVTecScrewAlignment(Transform):
             raise ValueError("SRT 값은 유한해야 하며 scale은 양수여야 합니다.")
         matrix = cv2.getRotationMatrix2D(center, srt.rotation, srt.scale)
         matrix[:, 2] += np.asarray(srt.translation, dtype=np.float64)
-        return {"matrix": matrix, "size": (width, height), "srt": srt}
+        # 정렬 후 출력 좌표를 1/4로 축소한다. 이동량도 함께 축소해야 한다.
+        # 기본 SRT에서는 [[0.25, 0, 0], [0, 0.25, 0]]이 된다.
+        matrix *= 0.25
+        return {"matrix": matrix, "size": (256, 256), "srt": srt}
 
     @staticmethod
     def _to_numpy(inpt: tv_tensors.Image | tv_tensors.Mask) -> np.ndarray:
