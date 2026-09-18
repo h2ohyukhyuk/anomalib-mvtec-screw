@@ -21,28 +21,38 @@ from torchvision.transforms.v2 import Compose, Normalize, Resize
 import logging
 from torchvision.transforms.v2 import Transform
 from torchvision import tv_tensors
-from torch.utils.data import get_worker_info
+from multiprocessing import get_context
 import os
 
 logger = logging.getLogger(__name__)
 logger.warning("jsh this is a warning")
 
 
-class MyTransform(Transform):
+class DebugTransform(Transform):
+    _transformed_types = (tv_tensors.Image, tv_tensors.Mask)
 
     def __init__(self):
         super().__init__()
-        self.once = True
+        # 이미지/마스크 출력 여부를 worker 및 train/val/test 사이에서 공유한다.
+        self._logged = get_context("spawn").Array("b", [False, False])
+
+    def __deepcopy__(self, memo):
+        # Identity 변환이며, Dataset 복사 시에도 같은 로그 상태를 유지한다.
+        memo[id(self)] = self
+        return self
 
     def transform(self, inpt, params):
+        if isinstance(inpt, tv_tensors.Image):
+            index, kind = 0, "image"
+        elif isinstance(inpt, tv_tensors.Mask):
+            index, kind = 1, "mask"
+        else:
+            return inpt
 
-        if self.once:
-            self.once = False
-
-            worker = get_worker_info()
-
-            if worker.id == 0:
-                logger.warning("===== MyTransform called =====")
+        # 여러 worker가 동시에 접근해도 각 타입의 로그는 한 번만 출력한다.
+        with self._logged.get_lock():
+            if not self._logged[index]:
+                logger.warning(f"===== MyTransform called ({kind}) =====")
                 logger.warning(f"type: {type(inpt)}")
                 logger.warning(f"shape: {inpt.shape}")
                 logger.warning(f"dtype: {inpt.dtype}")
@@ -51,8 +61,30 @@ class MyTransform(Transform):
                 logger.warning(f"max: {inpt.max().item()}")
                 logger.warning(f"params: {params}")
                 logger.warning("==============================")
+                self._logged[index] = True
 
         return inpt
+
+    '''
+    ===== MyTransform called (image) =====
+    type: <class 'torchvision.tv_tensors._image.Image'>
+    shape: torch.Size([3, 1024, 1024])
+    dtype: torch.float32
+    device: cpu
+    min: 0.1568627506494522
+    max: 0.8352941870689392
+    params: {}
+    ==============================
+    ===== MyTransform called (mask) =====
+    type: <class 'torchvision.tv_tensors._mask.Mask'>
+    shape: torch.Size([1024, 1024])
+    dtype: torch.uint8
+    device: cpu
+    min: 0
+    max: 0
+    params: {}
+    ==============================
+    '''
 
 def main():
 
@@ -70,7 +102,7 @@ def main():
     # ============================================================
 
     train_augmentations = Compose([
-            MyTransform(),
+            DebugTransform(),
             Resize((256, 256), antialias=True),
             Normalize(
                 mean=[0.485, 0.456, 0.406],
