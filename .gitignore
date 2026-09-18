@@ -1,0 +1,67 @@
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments and local environment variables
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# IDE and operating system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Python packaging outputs
+build/
+dist/
+*.egg-info/
+
+# Local datasets (do not ignore source modules named data)
+/datasets/
+/data/
+/MVTecAD/
+/mvtec_anomaly_detection/
+/imagenette2/
+
+# Experiment outputs, including tutorial_custom_dataset/results
+outputs/
+results/
+runs/
+lightning_logs/
+wandb/
+mlruns/
+checkpoints/
+weights/
+# Anomalib model-named output directories when default_root_dir is '.'
+/Patchcore/
+/Padim/
+/EfficientAd/
+
+# Model checkpoints and exports
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.engine
+*.safetensors
+
+# Logs and TensorBoard event files
+*.log
+log.txt
+events.out.tfevents.*
