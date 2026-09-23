@@ -1,101 +1,29 @@
+import os
 from pathlib import Path
 from time import perf_counter
 
 import cv2
 import numpy as np
+from common.coarse_alignment import coarse_alignment_pts_mvtecad_screw, align_end_points_to_target
+
+# OpenCV의 Qt5 창은 XWayland를 명시적으로 사용합니다.
+if os.environ.get('XDG_SESSION_TYPE') == 'wayland' and os.environ.get('DISPLAY'):
+    platform = os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
+    if platform == 'xcb':
+        os.environ['XDG_SESSION_TYPE'] = 'x11'
+
+# cv2 import가 지정한 fonts 경로가 없으면 실제 시스템 폰트 경로로 바꿉니다.
+qt_font_dir = os.environ.get('QT_QPA_FONTDIR')
+if qt_font_dir and not Path(qt_font_dir).is_dir():
+    system_font_dir = Path('/usr/share/fonts/truetype/dejavu')
+    if system_font_dir.is_dir():
+        os.environ['QT_QPA_FONTDIR'] = str(system_font_dir)
+    else:
+        os.environ.pop('QT_QPA_FONTDIR', None)
 
 
-def find_end_points(foreground, hull_mask):
-    """Return the two extreme hull pixels on the PCA axis as (x, y)."""
-    if foreground is not None and len(foreground) >= 2:
-        points = foreground.reshape(-1, 2).astype(np.float64)
-        center = points.mean(axis=0)
-        centered = points - center
-        covariance = centered.T @ centered / len(points)
-        _, eigenvectors = np.linalg.eigh(covariance)
-        principal_direction = eigenvectors[:, -1]
-        # Fix the sign so endpoint ordering is consistent.
-        dominant_axis = np.argmax(np.abs(principal_direction))
-        if principal_direction[dominant_axis] < 0:
-            principal_direction = -principal_direction
 
-        # Rasterize the center axis, then keep only pixels inside the hull.
-        height, width = hull_mask.shape
-        reach = np.hypot(width, height)
-        line_start = center - reach * principal_direction
-        line_end = center + reach * principal_direction
-        axis_mask = np.zeros_like(hull_mask)
-        shift = 8
-        fixed_start = tuple(np.rint(line_start * (1 << shift)).astype(int).tolist())
-        fixed_end = tuple(np.rint(line_end * (1 << shift)).astype(int).tolist())
-        cv2.line(axis_mask, fixed_start, fixed_end, 255, 1, cv2.LINE_8, shift)
-        axis_pixels = cv2.findNonZero(cv2.bitwise_and(axis_mask, hull_mask))
-        if axis_pixels is not None and len(axis_pixels) >= 2:
-            axis_pixels = axis_pixels.reshape(-1, 2)
-            projection = (axis_pixels - center) @ principal_direction
-            end_point_1 = tuple(axis_pixels[projection.argmin()].tolist())
-            end_point_2 = tuple(axis_pixels[projection.argmax()].tolist())
-
-            return end_point_1, end_point_2
-    return None, None
-
-def find_front_head(foreground, hull_mask, end_pt1, end_pt2,
-                    start_ratio=0.05, end_ratio=0.2, num_sections=5):
-    """Return (front, head) by comparing median widths near the endpoints.
-
-    Widths are approximated by perpendicular pixel spans in axial strips.
-    Return (None, None) for missing data, coincident endpoints or equal widths.
-    """
-    if not 0 <= start_ratio < end_ratio <= 0.5:
-        raise ValueError('Expected 0 <= start_ratio < end_ratio <= 0.5')
-    if not isinstance(num_sections, (int, np.integer)) or num_sections < 1:
-        raise ValueError('num_sections must be a positive integer')
-    if end_pt1 is None or end_pt2 is None:
-        return None, None
-
-    if foreground is None:
-        return None, None
-
-    point1 = np.asarray(end_pt1, dtype=np.float64)
-    point2 = np.asarray(end_pt2, dtype=np.float64)
-    axis = point2 - point1
-    length = np.linalg.norm(axis)
-    if length == 0:
-        return None, None
-    axis /= length
-    perpendicular = np.array([-axis[1], axis[0]])
-
-    # 모든 마스크 좌표를 나사 축 방향과 수직 방향으로 투영합니다.
-    relative = foreground.reshape(-1, 2).astype(np.float64) - point1
-    along = relative @ axis
-    across = relative @ perpendicular
-    boundaries = np.linspace(start_ratio * length, end_ratio * length,
-                             num_sections + 1)
-
-    def median_width(distance_from_end):
-        widths = []
-        for index in range(num_sections):
-            lower, upper = boundaries[index:index + 2]
-            # 각 구간의 수직 좌표 최댓값 - 최솟값으로 단면 폭을 근사합니다.
-            selected = (distance_from_end >= lower) & (distance_from_end < upper)
-            if index == num_sections - 1:
-                selected = (distance_from_end >= lower) & (distance_from_end <= upper)
-            section = across[selected]
-            if section.size < 2:
-                return None
-            widths.append(float(np.ptp(section)))
-        return float(np.median(widths))
-
-    width1 = median_width(along)
-    width2 = median_width(length - along)
-    if width1 is None or width2 is None or np.isclose(width1, width2):
-        return None, None
-    if width1 < width2:
-        return end_pt1, end_pt2
-    return end_pt2, end_pt1
-
-
-def draw_end_points(image, end_pt1, end_pt2):
+def draw_end_points(image, end_pt1, end_pt2, c1=(0, 0, 255), c2=(255, 0, 0)):
     """Draw the infinite line through both endpoints and mark them in place."""
     point1 = np.asarray(end_pt1, dtype=np.float64)
     point2 = np.asarray(end_pt2, dtype=np.float64)
@@ -112,100 +40,159 @@ def draw_end_points(image, end_pt1, end_pt2):
     line_start = tuple(np.rint((point1 - reach * direction) * (1 << shift)).astype(int).tolist())
     line_end = tuple(np.rint((point2 + reach * direction) * (1 << shift)).astype(int).tolist())
     cv2.line(image, line_start, line_end, (0, 255, 0), 1, cv2.LINE_AA, shift)
-    cv2.circle(image, end_pt1, 3, (0, 0, 255), -1, cv2.LINE_AA)
-    cv2.circle(image, end_pt2, 3, (255, 0, 0), -1, cv2.LINE_AA)
+    # 원 중심과 반지름도 shift=8 고정소수점으로 전달해 소수점 좌표를 표시합니다.
+    center1 = tuple(np.rint(point1 * (1 << shift)).astype(int).tolist())
+    center2 = tuple(np.rint(point2 * (1 << shift)).astype(int).tolist())
+    radius = 3 * (1 << shift)
+    cv2.circle(image, center1, radius, c1, -1, cv2.LINE_AA, shift)
+    cv2.circle(image, center2, radius, c2, -1, cv2.LINE_AA, shift)
 
 
-def coarse_alignment_mvtecad_screw(img, min_component_pixels, resize_ratio):
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff'}
 
-    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    img_gray_resize = cv2.resize(img_gray, (0, 0), fx=resize_ratio, fy=resize_ratio)
-    resize_h, resize_w = img_gray_resize.shape
+def process_image_directory(image_dir, output_dir, tpl_target_img, tpl_w, tpl_h,
+                            tpl_front_pt, tpl_head_pt,
+                            min_component_pixels=70, resize_ratio=0.09,
+                            filename_prefix=''):
+    """Align images and save template/aligned/difference comparison strips.
 
-    # Edge detection
-    scharr_x = cv2.Scharr(img_gray_resize, cv2.CV_32F, 1, 0)
-    scharr_y = cv2.Scharr(img_gray_resize, cv2.CV_32F, 0, 1)
-    scharr_magnitude = cv2.magnitude(scharr_x, scharr_y)
+    The saved image keeps its original filename, preceded by filename_prefix
+    when one is supplied. Return (saved_paths, failures).
+    """
+    image_dir = Path(image_dir)
+    output_dir = Path(output_dir)
+    if not image_dir.is_dir():
+        raise NotADirectoryError(f'Image directory not found: {image_dir}')
+    if tpl_target_img is None or tpl_target_img.size == 0:
+        raise ValueError('Template image must not be empty')
+    if tpl_w <= 0 or tpl_h <= 0:
+        raise ValueError('Template width and height must be positive')
+    if tpl_target_img.shape[:2] != (tpl_h, tpl_w):
+        raise ValueError(
+            'Template image size does not match tpl_w and tpl_h: '
+            f'{tpl_target_img.shape[1]}x{tpl_target_img.shape[0]} != {tpl_w}x{tpl_h}'
+        )
 
-    scharr_display = cv2.normalize(
-        scharr_magnitude, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U
+    output_dir.mkdir(parents=True, exist_ok=True)
+    image_paths = sorted(
+        path for path in image_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
     )
+    saved_paths = []
+    failures = []
 
-    _, scharr_display = cv2.threshold(
-        scharr_display, 70, 255, cv2.THRESH_BINARY
-    )
+    for image_path in image_paths:
+        if "mask" in image_path.stem:
+            continue
 
-    # Delete small components
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        scharr_display, connectivity=8
-    )
-    # Label 0 is the background; filter only foreground components.
-    for label in range(1, num_labels):
-        if stats[label, cv2.CC_STAT_AREA] < min_component_pixels:
-            scharr_display[labels == label] = 0
+        started_at = perf_counter()
+        try:
+            img = cv2.imread(str(image_path))
+            if img is None:
+                raise ValueError('Image could not be decoded')
 
-    # convex hull
-    edge_points = cv2.findNonZero(scharr_display)
-    if edge_points is not None:
-        hull = cv2.convexHull(edge_points)
-        scharr_display.fill(0)
-        cv2.fillConvexPoly(scharr_display, hull, 255)
+            coarse_front_pt, coarse_head_pt = coarse_alignment_pts_mvtecad_screw(
+                img, min_component_pixels, resize_ratio,
+            )
+            aligned_img, _ = align_end_points_to_target(
+                img, coarse_front_pt, coarse_head_pt,
+                tpl_front_pt, tpl_head_pt, tpl_w, tpl_h,
+            )
+            diff_img = cv2.absdiff(tpl_target_img, aligned_img)
+            comparison_img = cv2.hconcat(
+                (tpl_target_img, aligned_img, diff_img)
+            )
 
-    # mean, covariance, end point
-    hull_mask = scharr_display.copy() # 이미지 배열, 0 or 255,
-    foreground = cv2.findNonZero(hull_mask) # 0이 아닌 픽셀 좌표 목록
+            output_name = (
+                f'{filename_prefix}_{image_path.name}'
+                if filename_prefix else image_path.name
+            )
+            output_path = output_dir / output_name
+            if not cv2.imwrite(str(output_path), comparison_img):
+                raise OSError(f'Failed to write comparison image: {output_path}')
+        except (cv2.error, OSError, ValueError) as error:
+            failures.append((image_path, str(error)))
+            print(f'[FAILED] {image_path}: {error}')
+            continue
 
-    # find end points
-    end_pt1, end_pt2 = find_end_points(foreground, hull_mask)
+        saved_paths.append(output_path)
+        elapsed_ms = (perf_counter() - started_at) * 1000
+        print(f'[{image_path.name}] -> {output_name}: {elapsed_ms:.3f} ms')
 
-    if end_pt1 is None or end_pt2 is None:
-        raise ValueError(f'Two distinct endpoints not found: {image_path}')
+    return saved_paths, failures
 
-    # find front and head
-    front_pt, head_pt = find_front_head(foreground, hull_mask, end_pt1, end_pt2)
 
-    if front_pt is None or head_pt is None:
-        raise ValueError(f'front_pt or head_pt not found: {image_path}')
+def process_image_subdirectories(root_dir, output_dir, tpl_target_img, tpl_w, tpl_h,
+                                 tpl_front_pt, tpl_head_pt,
+                                 min_component_pixels=70, resize_ratio=0.09):
+    """Recursively align images and flatten all results into output_dir.
 
-    # 실제 리사이즈 크기를 기준으로 원본 좌표로 환산합니다.
-    original_h, original_w = img.shape[:2]
-    scale_x = original_w / resize_w
-    scale_y = original_h / resize_h
-    original_front_pt = (round(front_pt[0] * scale_x), round(front_pt[1] * scale_y))
-    original_head_pt = (round(head_pt[0] * scale_x), round(head_pt[1] * scale_y))
-    # img_resize_display = cv2.cvtColor(img_gray_resize, cv2.COLOR_GRAY2BGR)
-    # scharr_display = cv2.cvtColor(scharr_display, cv2.COLOR_GRAY2BGR)
-    #
-    # draw_end_points(img_resize_display, front_pt, head_pt)
-    # draw_end_points(scharr_display, front_pt, head_pt)
-    #
-    # comparison = cv2.hconcat([img_resize_display, scharr_display])
+    Relative subdirectory names are joined with underscores and prepended to
+    each output filename, so equal image names from different folders do not
+    overwrite each other.
+    """
+    root_dir = Path(root_dir)
+    output_dir = Path(output_dir)
+    if not root_dir.is_dir():
+        raise NotADirectoryError(f'Root image directory not found: {root_dir}')
 
-    return original_front_pt, original_head_pt
+    root_resolved = root_dir.resolve()
+    output_resolved = output_dir.resolve()
+    image_dirs = set()
+    for image_path in root_dir.rglob('*'):
+        if not image_path.is_file() or image_path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        resolved_path = image_path.resolve()
+        if resolved_path == output_resolved or output_resolved in resolved_path.parents:
+            continue
+        image_dirs.add(image_path.parent)
+
+    all_saved_paths = []
+    all_failures = []
+    for image_dir in sorted(image_dirs):
+        relative_dir = image_dir.resolve().relative_to(root_resolved)
+        prefix = root_dir.name if relative_dir == Path('.') else '_'.join(relative_dir.parts)
+        saved_paths, failures = process_image_directory(
+            image_dir, output_dir, tpl_target_img, tpl_w, tpl_h,
+            tpl_front_pt, tpl_head_pt,
+            min_component_pixels=min_component_pixels,
+            resize_ratio=resize_ratio,
+            filename_prefix=prefix,
+        )
+        all_saved_paths.extend(saved_paths)
+        all_failures.extend(failures)
+
+    return all_saved_paths, all_failures
+
 
 
 if __name__ == '__main__':
+    image_root_dir = Path(
+        '/home/sh-jeon/database/MVTec-AD/mvtec_anomaly_detection/screw'
+    )
+    output_dir = Path(
+        '/home/sh-jeon/database/MVTec-AD/mvtec_anomaly_detection/screw_coarse_alignment_test'
+    )
+    tpl_target_img_path = Path(
+        '/home/sh-jeon/database/MVTec-AD/mvtec_anomaly_detection/'
+        'screw_templates/000_t_256.png'
+    )
+    tpl_target_img = cv2.imread(str(tpl_target_img_path))
+    if tpl_target_img is None:
+        raise FileNotFoundError(f'Could not read template: {tpl_target_img_path}')
 
-    image_dir = Path('/home/sh-jeon/database/MVTec-AD/mvtec_anomaly_detection/screw/train/good')
     min_component_pixels = 70
     resize_ratio = 0.09
+    tpl_w, tpl_h = 128, 256
+    tpl_h, tpl_w = tpl_target_img.shape[:2]
+    tpl_front_pt, tpl_head_pt = (64.0, 20.0), (64.0, 236.0)
 
-    for image_path in sorted(image_dir.glob('*.png')):
-        img = cv2.imread(str(image_path))
-        if img is None:
-            raise FileNotFoundError(f'Could not read image: {image_path}')
-        started_at = perf_counter()
-
-        original_front_pt, original_head_pt = coarse_alignment_mvtecad_screw(img, min_component_pixels, resize_ratio)
-
-        draw_end_points(img, original_front_pt, original_head_pt)
-
-        elapsed_ms = (perf_counter() - started_at) * 1000
-        print(f'[{image_path.name}] proc duration: {elapsed_ms:.3f} ms')
-
-        cv2.imshow('result', img )
-        key = cv2.waitKey(0)
-
-        if key == ord('q'):
-            break
+    saved_paths, failures = process_image_subdirectories(
+        image_root_dir, output_dir, tpl_target_img, tpl_w, tpl_h,
+        tpl_front_pt, tpl_head_pt,
+        min_component_pixels=min_component_pixels,
+        resize_ratio=resize_ratio,
+    )
+    print(f'Saved {len(saved_paths)} aligned images to: {output_dir}')
+    print(f'Failed images: {len(failures)}')

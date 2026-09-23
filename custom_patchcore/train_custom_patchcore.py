@@ -40,7 +40,7 @@ def main():
     # ============================================================
 
     train_augmentations = Compose([
-            DebugTransform(),
+            #DebugTransform(),
             MVTecScrewAlignment(),
             Normalize(
                 mean=[0.485, 0.456, 0.406],

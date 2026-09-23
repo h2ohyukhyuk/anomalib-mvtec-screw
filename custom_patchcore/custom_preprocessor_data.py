@@ -94,6 +94,7 @@ class MVTecScrewAlignment(Transform):
         원본 텐서와 분리된 복사본이므로 OpenCV에서 분석할 수 있다.
         현재는 rotation=0, scale=1, translation=(0,0)을 반환한다.
         """
+
         return SRTParameters()
 
     def make_params(self, flat_inputs: list[Any]) -> dict[str, Any]:
