@@ -3,6 +3,7 @@ anomalib 공식 예제 코드
 https://anomalib.readthedocs.io/en/latest/markdown/guides/reference/models/image/efficient_ad.html
 EfficientAD: Accurate Visual Anomaly Detection at Millisecond-Level Latencies, WACV 2024
 
+CLI
 anomalib train --config config.yaml 2>&1 | tee log.txt
 
 seed_everything: 42
